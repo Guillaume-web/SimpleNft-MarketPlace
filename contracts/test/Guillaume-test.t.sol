@@ -90,25 +90,33 @@ contract SimpleNftMarketplace_test_guillaume_test is Helper {
     assert(adresseValide != address(0));
   }
 
+  function test_SimpleNftMarketplace_basic_blacklistUser() public {
+    helper_blacklist_user(MODERATOR, USER, true); // ajouter USER à la liste noire
+  }
+
   function test_SimpleNftMarketplace_basic_blacklistUser_admin() public {
-    helper_blacklistUser(ADMIN, address(1), true);
+    helper_blacklist_user(ADMIN, address(1), true);
     assertTrue(marketplace.isBlacklistedUser(address(1)));
   }
 
   function test_SimpleNftMarketplace_basic_blacklistUser_moderator() public {
     verify_revertCall(RevertStatus.CallerNotModerator);
     helper_blacklistUser(MODERATOR, address(1), true);
+
+    helper_blacklist_user(address(2), address(1), true, RevertStatus.CallerNotModerator);
     assertTrue(!marketplace.isBlacklistedUser(address(1)));
   }
 
   function test_SimpleNftMarketplace_basic_blacklistToken_admin() public {
     helper_blacklistToken(ADMIN, address(1), 0, true);
+    helper_blacklist_token(ADMIN, address(1), 0, true);
     assertTrue(marketplace.isBlacklistedToken(address(1), 0));
   }
 
   function test_SimpleNftMarketplace_basic_blacklistToken_moderator() public {
     verify_revertCall(RevertStatus.CallerNotModerator);
     helper_blacklistToken(address(2), address(1), 0, true);
+    helper_blacklist_token(address(2), address(1), 0, true, RevertStatus.CallerNotModerator);
     assertTrue(!marketplace.isBlacklistedToken(address(1), 0));
   }
 }

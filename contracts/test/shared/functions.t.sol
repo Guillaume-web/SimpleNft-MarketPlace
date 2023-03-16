@@ -3,6 +3,7 @@ pragma solidity ^0.8.0;
 
 import 'foundry-test-utility/contracts/utils/console.sol';
 import { CheatCodes } from 'foundry-test-utility/contracts/utils/cheatcodes.sol';
+import { Signatures } from 'foundry-test-utility/contracts/shared/signatures.sol';
 import '@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol';
 import { Constants } from './constants.t.sol';
 import { Errors } from './errors.t.sol';
@@ -16,6 +17,10 @@ interface IERC721 {
   function mint(address sender, uint256 tokenId) external;
 
   function approve(address to, uint256 tokenId) external;
+
+  function balanceOf(address owner) external view returns (uint256 balance);
+
+  function ownerOf(uint256 tokenId) external view returns (address owner);
 }
 
 interface IERC20 {
@@ -24,7 +29,7 @@ interface IERC20 {
   function approve(address to, uint256 amount) external;
 }
 
-contract Functions is Constants, Errors, TestStorage {
+contract Functions is Constants, Errors, TestStorage, Signatures {
   SimpleNftMarketplace public marketplace;
 
   MockERC20 public token;
@@ -53,6 +58,8 @@ contract Functions is Constants, Errors, TestStorage {
 
     marketplace.initialize(TREASSURY);
 
+    marketplace.giveModeratorAccess(MODERATOR);
+
     vm.stopPrank();
     vm.roll(block.number + 1);
     vm.warp(block.timestamp + 100);
@@ -67,15 +74,26 @@ contract Functions is Constants, Errors, TestStorage {
   event Sale(uint256 listingId, address buyer);
   event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
 
+  function verify_buyListing(uint256 listingId, address buyer, address seller, uint256 startBuyerBalance, uint256 startSellerBalance) public {
+    uint256 endBuyerBalance = token.balanceOf(buyer);
+    uint256 endSellerBalance = token.balanceOf(seller);
+    uint256 listingPrice = marketplace.listingPrice(listingId);
+
+    assertTrue(marketplace.isSold(listingId), 'Listing is not sold');
+    assertTrue(!marketplace.isListingActive(listingId), 'Listing is active');
+    assertEq(endBuyerBalance, startBuyerBalance - listingPrice);
+    assertEq(endSellerBalance, startSellerBalance + listingPrice);
+  }
+
   function helper_createListing(address sender, address tokenContract, uint256 tokenId, uint256 salePrice, RevertStatus revertType_) public {
     verify_revertCall(revertType_);
     vm.prank(sender);
-    marketplace.createListing(tokenContract, tokenId, salePrice);
+    uint256 listingId = marketplace.createListing(tokenContract, tokenId, salePrice);
 
     // Verify
     if (revertType_ == RevertStatus.Success) {
-      assertEq(marketplace.listingPrice(0), 100);
-      assertTrue(marketplace.isListingActive(0), 'Functions: isListingActive');
+      assertEq(marketplace.listingPrice(listingId), salePrice);
+      assertTrue(marketplace.isListingActive(listingId), 'Functions: isListingActive');
     }
   }
 
@@ -93,6 +111,43 @@ contract Functions is Constants, Errors, TestStorage {
     helper_buyListing(sender, listingId, RevertStatus.Success);
   }
 
+  function helper_generateSignatureAndCreateListing(
+    address sender,
+    address nftContract,
+    uint256 tokenId,
+    uint256 salePrice,
+    uint256 sellerPk,
+    RevertStatus revertType_
+  ) public {
+    address seller = vm.addr(sellerPk);
+    bytes32 domainSeparator = keccak256(
+      abi.encode(
+        keccak256('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'),
+        keccak256(bytes(CONTRACT_NAME)),
+        keccak256(bytes(CONTRACT_VERSION)),
+        block.chainid,
+        address(marketplace)
+      )
+    );
+    bytes32 structHash = keccak256(
+      abi.encode(
+        keccak256('CreateListing(address tokenContract,uint256 tokenId,uint256 salePrice,address seller)'),
+        address(nftContract),
+        tokenId,
+        salePrice,
+        seller
+      )
+    );
+
+    (uint8 v, bytes32 r, bytes32 s) = signature_signHash(sellerPk, SignatureType.eip712, domainSeparator, structHash);
+
+    helper_createListing(sender, address(nftContract), tokenId, salePrice, seller, v, r, s, revertType_);
+  }
+
+  function helper_generateSignatureAndCreateListing(address sender, address nftContract, uint256 tokenId, uint256 salePrice, uint256 sellerPk) public {
+    helper_generateSignatureAndCreateListing(sender, nftContract, tokenId, salePrice, sellerPk, RevertStatus.Success);
+  }
+
   function helper_createListing(
     address sender,
     address tokenContract,
@@ -104,8 +159,15 @@ contract Functions is Constants, Errors, TestStorage {
     bytes32 s,
     RevertStatus revertType_
   ) public {
+    verify_revertCall(revertType_);
     vm.prank(sender);
-    marketplace.createListing(tokenContract, tokenId, salePrice, seller, v, r, s);
+    uint256 listingId = marketplace.createListing(tokenContract, tokenId, salePrice, seller, v, r, s);
+
+    // Verify
+    if (revertType_ == RevertStatus.Success) {
+      assertEq(marketplace.listingPrice(listingId), salePrice);
+      assertTrue(marketplace.isListingActive(listingId), 'Listing is not active');
+    }
   }
 
   function helper_createListing(
@@ -121,15 +183,45 @@ contract Functions is Constants, Errors, TestStorage {
     helper_createListing(sender, tokenContract, tokenId, salePrice, seller, v, r, s, RevertStatus.Success);
   }
 
+  function helper_generateSignatureAndBuyListing(address sender, uint256 listingId, uint256 buyerPk, RevertStatus revertType_) public {
+    address buyer = vm.addr(buyerPk);
+    bytes32 domainSeparator = keccak256(
+      abi.encode(
+        keccak256('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'),
+        keccak256(bytes(CONTRACT_NAME)),
+        keccak256(bytes(CONTRACT_VERSION)),
+        block.chainid,
+        address(marketplace)
+      )
+    );
+    bytes32 structHash = keccak256(abi.encode(keccak256('BuyListing(uint256 listingId,address buyer)'), listingId, buyer));
+
+    (uint8 v, bytes32 r, bytes32 s) = signature_signHash(buyerPk, SignatureType.eip712, domainSeparator, structHash);
+
+    helper_buyListing(sender, listingId, buyer, v, r, s, revertType_);
+  }
+
+  function helper_generateSignatureAndBuyListing(address sender, uint256 listingId, uint256 buyerPk) public {
+    helper_generateSignatureAndBuyListing(sender, listingId, buyerPk, RevertStatus.Success);
+  }
+
   function helper_buyListing(address sender, uint256 listingId, address buyer, uint8 v, bytes32 r, bytes32 s, RevertStatus revertType_) public {
+    uint256 startBuyerBalance = token.balanceOf(buyer);
+    address seller = marketplace.getListingDetail(listingId).seller;
+    uint256 startSellerBalance = token.balanceOf(seller);
+
     verify_revertCall(revertType_);
     vm.prank(sender);
     marketplace.buyListing(listingId, buyer, v, r, s);
+
+    if (revertType_ == RevertStatus.Success) {
+      verify_buyListing(listingId, buyer, seller, startBuyerBalance, startSellerBalance);
+      IERC721(nft).
+    }
   }
 
   function helper_buyListing(address sender, uint256 listingId, address buyer, uint8 v, bytes32 r, bytes32 s) public {
-    vm.prank(sender);
-    marketplace.buyListing(listingId, buyer, v, r, s);
+    helper_buyListing(sender, listingId, buyer, v, r, s, RevertStatus.Success);
   }
 
   function helper_cancelListing(address sender, uint256 listingId) public {
@@ -195,5 +287,32 @@ contract Functions is Constants, Errors, TestStorage {
   function helper_blacklistToken(address sender, address tokenContract, uint256 tokenId, bool isBlackListed) public {
     vm.prank(sender);
     marketplace.blacklistToken(tokenContract, tokenId, isBlackListed);
+
+  function helper_blacklist_user(address sender, address userAddress, bool set, RevertStatus revertType) public {
+    if (revertType == RevertStatus.Success) assertTrue(!marketplace.isBlacklistedUser(userAddress));
+
+    verify_revertCall(revertType);
+    vm.prank(sender);
+    marketplace.blacklistUser(userAddress, set);
+
+    if (revertType == RevertStatus.Success) assertTrue(marketplace.isBlacklistedUser(userAddress));
+  }
+
+  function helper_blacklist_user(address sender, address userAddress, bool set) public {
+    helper_blacklist_user(sender, userAddress, set, RevertStatus.Success);
+  }
+
+  function helper_blacklist_token(address sender, address contractAddress, uint256 tokenId, bool set, RevertStatus revertType) public {
+    if (revertType == RevertStatus.Success) assertTrue(!marketplace.isBlacklistedToken(contractAddress, tokenId));
+
+    verify_revertCall(revertType);
+    vm.prank(sender);
+    marketplace.blacklistToken(contractAddress, tokenId, set);
+
+    if (revertType == RevertStatus.Success) assertTrue(marketplace.isBlacklistedToken(contractAddress, tokenId));
+  }
+
+  function helper_blacklist_token(address sender, address contractAddress, uint256 tokenId, bool set) public {
+    helper_blacklist_token(sender, contractAddress, tokenId, set, RevertStatus.Success);
   }
 }
