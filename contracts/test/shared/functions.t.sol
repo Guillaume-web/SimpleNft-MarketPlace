@@ -117,6 +117,19 @@ contract Functions is Constants, Errors, TestStorage, Signatures {
     assertEq(IERC721(tokenContract).balanceOf(seller), startSellerBalance - 1);
   }
 
+  function verify_cancelListing(uint256 listingId, uint256 startSellerBalance, uint256 startMarketplaceBalance) public {
+    SimpleNftMarketplace.Listing memory listingDetail = marketplace.getListingDetail(listingId);
+
+    uint256 endSellerBalance = IERC721(listingDetail.tokenContract).balanceOf(listingDetail.seller);
+    uint256 endMarketplaceBalance = IERC721(listingDetail.tokenContract).balanceOf(address(marketplace));
+
+    assertTrue(!marketplace.isListingActive(listingId), 'Listing should be inactive');
+    assertEq(marketplace.listingPrice(listingId), 0, 'Listing price should be 0');
+    assertEq(IERC721(listingDetail.tokenContract).ownerOf(listingDetail.tokenId), listingDetail.seller);
+    assertEq(IERC721(listingDetail.tokenContract).balanceOf(address(marketplace)), startMarketplaceBalance - 1);
+    assertEq(IERC721(listingDetail.tokenContract).balanceOf(listingDetail.seller), startSellerBalance + 1);
+  }
+
   function helper_createListing(address seller, address tokenContract, uint256 tokenId, uint256 salePrice, RevertStatus revertType_) public {
     uint256 startSellerBalance = IERC721(tokenContract).balanceOf(seller);
     uint256 startMarketplaceBalance = IERC721(tokenContract).balanceOf(address(marketplace));
@@ -259,7 +272,8 @@ contract Functions is Constants, Errors, TestStorage, Signatures {
 
     uint256 startSellerBalance = token.balanceOf(listingDetail.seller);
 
-    verify_revertCall(revertType_);
+    if (revertType_ == RevertStatus.OverUnderflow) vm.expectRevert(abi.encodeWithSignature('Panic(uint256)', 0x11));
+    else verify_revertCall(revertType_);
     vm.prank(sender);
     marketplace.buyListing(listingId, buyer, v, r, s);
 
@@ -272,9 +286,23 @@ contract Functions is Constants, Errors, TestStorage, Signatures {
     helper_buyListing(sender, listingId, buyer, v, r, s, RevertStatus.Success);
   }
 
-  function helper_cancelListing(address sender, uint256 listingId) public {
+  function helper_cancelListing(address sender, uint256 listingId, RevertStatus revertType_) public {
+    SimpleNftMarketplace.Listing memory listingDetail = marketplace.getListingDetail(listingId);
+
+    uint256 startSellerBalance = IERC721(listingDetail.tokenContract).balanceOf(listingDetail.seller);
+    uint256 startMarketplaceBalance = IERC721(listingDetail.tokenContract).balanceOf(address(marketplace));
+
+    verify_revertCall(revertType_);
     vm.prank(sender);
     marketplace.cancelListing(listingId);
+
+    if (revertType_ == RevertStatus.Success) {
+      verify_cancelListing(listingId, startSellerBalance, startMarketplaceBalance);
+    }
+  }
+
+  function helper_cancelListing(address sender, uint256 listingId) public {
+    helper_cancelListing(sender, listingId, RevertStatus.Success);
   }
 
   function helper_changeToken(address sender, IERC20Upgradeable contractAddress, RevertStatus revertType) public {
@@ -362,5 +390,15 @@ contract Functions is Constants, Errors, TestStorage, Signatures {
 
   function helper_blacklist_token(address sender, address contractAddress, uint256 tokenId, bool set) public {
     helper_blacklist_token(sender, contractAddress, tokenId, set, RevertStatus.Success);
+  }
+
+  function helper_editListingPrice(address sender, uint256 listingId, uint256 newPrice, RevertStatus revertType) public {
+    verify_revertCall(revertType);
+    vm.prank(sender);
+    marketplace.editListingPrice(listingId, newPrice);
+
+    if (revertType == RevertStatus.Success) {
+      assertEq(marketplace.listingPrice(listingId), newPrice, 'Listing price not updated');
+    }
   }
 }
